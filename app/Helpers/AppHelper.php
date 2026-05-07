@@ -892,10 +892,24 @@ class AppHelper
 
         if(isset($user) && $user->employee_code){
 
-            $codeNumber = explode("-",$user->employee_code);
+            // Check if the employee code follows the expected PREFIX-NUMBER format
+            if (preg_match('/^' . preg_quote($prefix) . '-(\d+)$/', $user->employee_code, $matches)) {
+                // Extract the number and increment
+                $codeId = (int)$matches[1] + 1;
+                $code = $prefix.'-'.str_pad( $codeId, 5, '0', STR_PAD_LEFT);
+            } else {
+                // If it doesn't follow the expected format (e.g., custom format from CSV),
+                // find the highest numbered employee code with the expected format
+                $lastStandardCode = User::where('employee_code', 'like', $prefix.'-%')
+                    ->orderBy('created_at', 'desc')
+                    ->first('employee_code');
 
-            $codeId = (int)$codeNumber[1] +1;
-            $code = $prefix.'-'.str_pad( $codeId, 5, '0', STR_PAD_LEFT);
+                if ($lastStandardCode && preg_match('/^' . preg_quote($prefix) . '-(\d+)$/', $lastStandardCode->employee_code, $matches)) {
+                    $codeId = (int)$matches[1] + 1;
+                    $code = $prefix.'-'.str_pad( $codeId, 5, '0', STR_PAD_LEFT);
+                }
+                // If no standard format found, use the default starting code
+            }
 
         }
         return $code;
@@ -1201,7 +1215,8 @@ class AppHelper
             $month = $dateInAd['month'];
         }else{
             $date = date('Y-m-d',strtotime($date));
-            $month = date('F', strtotime($date));
+            // $month = date('F', strtotime($date));
+            $month = (int)date('n', strtotime($date));  // Returns 1 ✅
         }
 
         return $month;

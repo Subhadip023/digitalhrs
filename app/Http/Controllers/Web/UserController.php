@@ -129,6 +129,11 @@ class UserController extends Controller
         try {
             $validatedData = $request->validated();
 
+            // Handle employee_id - auto-generate if empty
+            if (empty(trim($validatedData['employee_code'] ?? ''))) {
+                $validatedData['employee_code'] = AppHelper::getEmployeeCode();
+            }
+
             // Create full name from surname, first_name, middle_name
             $nameParts = array_filter([
                 $validatedData['surname'] ?? '',
@@ -238,6 +243,11 @@ class UserController extends Controller
 
             if (env('DEMO_MODE', false) && (in_array($id, [1, 2]))) {
                 throw new Exception(__('message.add_company_warning'), 400);
+            }
+
+            // Handle employee_id - keep existing if empty
+            if (empty(trim($validatedData['employee_code'] ?? ''))) {
+                unset($validatedData['employee_code']);
             }
 
             $accountValidatedData = $accountRequest->validated();
@@ -359,12 +369,31 @@ class UserController extends Controller
                 throw new Exception(__('message.user_not_found'), 404);
             }
 
-            $authUser = auth('admin')->user() ?? auth()->user();
-            if ($usersDetail->id == optional($authUser)->id) {
-                throw new Exception(__('message._delete_own'), 402);
+            // $authUser = auth('admin')->user() ?? auth()->user();
+            // if ($usersDetail->id == optional($authUser)->id) {
+            //     throw new Exception(__('message._delete_own'), 402);
+            // }
+
+            // Only prevent deletion if logged in as regular user (not admin) and trying to delete yourself
+            if (auth()->check() && !auth('admin')->check()) {
+                // Regular user login - prevent deleting yourself
+                if ($usersDetail->id == auth()->id()) {
+                    throw new Exception(__('message._delete_own'), 402);
+                }
             }
+            // If logged in as admin (from admins table), allow deleting any employee
 
             DB::beginTransaction();
+
+            // DELETE ADVANCE SALARY RECORDS (including attachments)
+            $advanceSalaries = \App\Models\AdvanceSalary::where('employee_id', $id)->get();
+            foreach ($advanceSalaries as $advanceSalary) {
+                // This will trigger the model's deleting event which deletes attachments
+                $advanceSalary->delete();
+            }
+
+            // DELETE LEAVE REQUESTS
+            \App\Models\LeaveRequestMaster::where('requested_by', $id)->delete();
 
             // DELETE EMPLOYEE ACCOUNT (BVN, bank details)
             DB::table('employee_accounts')->where('user_id', $id)->delete();
@@ -797,7 +826,7 @@ class UserController extends Controller
                     ],
                     'employee_id' => [
                         'nullable',
-                        'regex:/^' . AppHelper::getEmployeeCodePrefix() . '-\d{5}$/',
+                        'string',
                         \Illuminate\Validation\Rule::unique('users', 'employee_code')->whereNull('deleted_at')
                     ],
                     'nin' => [
@@ -829,7 +858,6 @@ class UserController extends Controller
                     'employment_date' => 'nullable|date_format:Y-m-d',
                     'date_of_birth' => 'nullable|date_format:Y-m-d',
                 ], [
-                    'employee_id.regex' => 'Employee ID must be in format ' . AppHelper::getEmployeeCodePrefix() . '-XXXXX (5 digits)',
                     'employee_id.unique' => 'The employee id has already been taken.',
                     'email.unique' => 'The email has already been taken.',
                     'phone_no.unique' => 'The phone number has already been taken.',
@@ -947,17 +975,13 @@ class UserController extends Controller
                 $email = strtolower(trim($data['email']));
                 $username = strtolower(trim(explode('@', $email)[0]));
 
-                // Get employee code - auto generate only if empty or invalid format
+                // Get employee code - auto generate only if empty
                 $employeeCode = null;
-                if (!empty($data['employee_id'])) {
-                    // Validate format
-                    $prefix = AppHelper::getEmployeeCodePrefix();
-                    if (preg_match('/^' . $prefix . '-\d{5}$/', $data['employee_id'])) {
-                        $employeeCode = $data['employee_id'];
-                    }
-                }
-                // If still null, auto-generate
-                if (!$employeeCode) {
+                if (!empty(trim($data['employee_id']))) {
+                    // Use provided employee ID as-is (any format)
+                    $employeeCode = trim($data['employee_id']);
+                } else {
+                    // Auto-generate if empty
                     $employeeCode = AppHelper::getEmployeeCode();
                 }
 

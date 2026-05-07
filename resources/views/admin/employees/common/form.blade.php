@@ -26,10 +26,11 @@
                     <input type="text" class="form-control"
                            id="employee_code"
                            name="employee_code"
-                           readonly
-                           style="pointer-events: none;"
                            value="{{ ( isset($userDetail) ? $userDetail->employee_code: $employeeCode )}}" autocomplete="off"
-                           placeholder="{{ __('index.employee_id') }}" required>
+                           placeholder="{{ __('index.employee_id') }}">
+                    @if(!isset($userDetail))
+                        <small class="text-muted">Leave empty to auto-generate (PJD-00000 format)</small>
+                    @endif
                 </div>
 
                 <!-- UPDATED: Split Name into 3 fields -->
