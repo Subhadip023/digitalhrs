@@ -36,6 +36,7 @@ use Laravel\Passport\TokenRepository;
 use Picqer\Barcode\BarcodeGeneratorSVG;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
 use Spatie\Browsershot\Browsershot;
+use App\Models\Department;
 
 class UserController extends Controller
 {
@@ -777,7 +778,12 @@ class UserController extends Controller
             $rowNumber = 1;
             $companyId = AppHelper::getAuthUserCompanyId();
 
+            // Increase execution time for large CSV uploads
+            set_time_limit(300); // 5 minutes
+
             DB::beginTransaction();
+            $batchSize = 50; // Reduce batch size for better performance
+            $processedCount = 0;
 
             while (($row = fgetcsv($handle)) !== false) {
                 $rowNumber++;
@@ -812,29 +818,47 @@ class UserController extends Controller
                 //     'employee_id.regex' => 'Employee ID must be in format ' . AppHelper::getEmployeeCodePrefix() . '-XXXXX (e.g., ' . AppHelper::getEmployeeCodePrefix() . '-00001)',
                 //     'employee_id.unique' => 'The employee id has already been taken.',
                 // ]);
+                // Clean email data
+                if (!empty($data['email'])) {
+                    $data['email'] = trim($data['email']);
+                }
 
-                // Validate required fields + unique personal/financial IDs
+                // Clean and validate date formats
+                if (!empty($data['date_of_birth'])) {
+                    $data['date_of_birth'] = trim($data['date_of_birth']);
+                    // If date doesn't look like Y-m-d format, set to null to trigger N/A display
+                    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $data['date_of_birth'])) {
+                        $data['date_of_birth'] = null;
+                    }
+                }
+
+                if (!empty($data['employment_date'])) {
+                    $data['employment_date'] = trim($data['employment_date']);
+                    // If date doesn't look like Y-m-d format, set to null to trigger N/A display
+                    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $data['employment_date'])) {
+                        $data['employment_date'] = null;
+                    }
+                }
+
+                // Validate only essential fields + unique personal/financial IDs (all optional except email)
                 $validator = \Illuminate\Support\Facades\Validator::make($data, [
                     'email' => [
-                        'required',
-                        'email',
-                        \Illuminate\Validation\Rule::unique('users', 'email')->whereNull('deleted_at')
-                    ],
-                    'phone_no' => [
                         'nullable',
-                        \Illuminate\Validation\Rule::unique('users', 'phone')->whereNull('deleted_at')
+                        'email',
+                        \Illuminate\Validation\Rule::unique('users', 'email')->whereNull('deleted_at')->whereNotNull('email')
                     ],
+                    'phone_no' => 'nullable|string',
                     'employee_id' => [
                         'nullable',
                         'string',
                         \Illuminate\Validation\Rule::unique('users', 'employee_code')->whereNull('deleted_at')
                     ],
                     'nin' => [
-                        'required',
+                        'nullable',
                         \Illuminate\Validation\Rule::unique('users', 'nin')->whereNull('deleted_at')
                     ],
                     'bvn' => [
-                        'required',
+                        'nullable',
                         \Illuminate\Validation\Rule::unique('employee_accounts', 'bvn')->whereNotNull('bvn')
                     ],
                     'tax_id' => [
@@ -855,24 +879,23 @@ class UserController extends Controller
                     ],
                     'surname' => 'required|string',
                     'first_name' => 'required|string',
-                    'employment_date' => 'nullable|date_format:Y-m-d',
-                    'date_of_birth' => 'nullable|date_format:Y-m-d',
+                    'employment_date' => 'nullable|string',
+                    'date_of_birth' => 'nullable|string',
                 ], [
                     'employee_id.unique' => 'The employee id has already been taken.',
                     'email.unique' => 'The email has already been taken.',
                     'phone_no.unique' => 'The phone number has already been taken.',
-                    'nin.required' => 'NIN is required.',
                     'nin.unique' => 'The NIN has already been taken.',
-                    'bvn.required' => 'BVN is required.',
                     'bvn.unique' => 'The BVN has already been taken.',
                     'tax_id.unique' => 'The Tax ID has already been taken.',
                     'rsa_no.unique' => 'The RSA No has already been taken.',
                     'hmo_id.unique' => 'The HMO ID has already been taken.',
                     'account_no.unique' => 'The bank account number has already been taken.',
+                    'surname.required' => 'Surname is required.',
+                    'first_name.required' => 'First name is required.',
                     'employment_date.date_format' => 'The employment date does not match the format Y-m-d.',
                     'date_of_birth.date_format' => 'The date of birth does not match the format Y-m-d.',
                 ]);
-
 
                 if ($validator->fails()) {
                     $errors[] = "Row {$rowNumber}: " . implode(', ', $validator->errors()->all());
@@ -896,24 +919,46 @@ class UserController extends Controller
                     $uploadedBvns[] = $data['bvn'];
                 }
 
-                // Find Branch
-                $branch = \App\Models\Branch::where('name', $data['branch_company'])
-                    ->where('company_id', $companyId)
-                    ->first();
+                // Find Branch (optional - skip if not found)
+                $branch = null;
+                $branchId = null;
+                if (!empty($data['branch_company']) && $data['branch_company'] != 'N/A') {
+                    $branch = \App\Models\Branch::where('name', $data['branch_company'])
+                        ->where('company_id', $companyId)
+                        ->first();
 
-                if (!$branch) {
-                    $errors[] = "Row {$rowNumber}: Branch '{$data['branch_company']}' not found";
-                    continue;
+                    if ($branch) {
+                        $branchId = $branch->id;
+                    } else{
+                        $branch = \App\Models\Branch::create([
+                            'name' => $data['branch_company'],
+                            'company_id' => $companyId,
+                        ]);
+                        $branchId = $branch->id;
+                    }
+                    // If branch not found, continue with null branchId (will show N/A)
                 }
 
-                // Find Department
-                $department = \App\Models\Department::where('dept_name', $data['department'])
-                    ->where('branch_id', $branch->id)
-                    ->first();
+                // Find Department (optional - skip if not found)
+                $department = null;
+                $departmentId = null;
+                if (!empty($data['department']) && $data['department'] != 'N/A' && $branchId) {
+                    $department = Department::where('dept_name', $data['department'])
+                        ->where('branch_id', $branchId)
+                        ->first();
 
-                if (!$department) {
-                    $errors[] = "Row {$rowNumber}: Department '{$data['department']}' not found";
-                    continue;
+                    if ($department) {
+                        $departmentId = $department->id;
+                    }
+                    else{
+                        $department = Department::create([
+                            'dept_name' => $data['department'],
+                            'branch_id' => $branchId,
+                            'company_id' => $companyId,
+                        ]);
+                        $departmentId = $department->id;
+                    }
+                    // If department not found, continue with null departmentId (will show N/A)
                 }
 
                 // Find Supervisor
@@ -942,6 +987,13 @@ class UserController extends Controller
                     $post = \App\Models\Post::where('post_name', $data['designation'])->first();
                     if ($post) {
                         $postId = $post->id;
+                    }else{
+                        $post = \App\Models\Post::create([
+                            'post_name' => $data['designation'],
+                            'branch_id' => $branchId,
+                            'dept_id' => $departmentId,
+                        ]);
+                        $postId = $post->id;
                     }
                 }
 
@@ -964,6 +1016,14 @@ class UserController extends Controller
                             if ($ot->opening_time === $openingTime && $ot->closing_time === $closingTime) {
                                 $officeTimeId = $ot->id;
                                 break;
+                            }else{
+                                $office = \App\Models\OfficeTime::create([
+                                    'company_id' => $companyId,
+                                    'opening_time' => $openingTime,
+                                    'closing_time' => $closingTime,
+                                    'is_active' => 1,
+                                ]);
+                                $officeTimeId = $office->id;
                             }
                         }
                     }
@@ -971,9 +1031,10 @@ class UserController extends Controller
 
 
                 // Prepare data
-                $fullName = trim($data['first_name'] . ' ' . ($data['middle_name'] ?? '') . ' ' . $data['surname']);
-                $email = strtolower(trim($data['email']));
-                $username = strtolower(trim(explode('@', $email)[0]));
+                $fullName = trim(($data['first_name'] ?? '') . ' ' . ($data['middle_name'] ?? '') . ' ' . ($data['surname'] ?? ''));
+
+                $email = !empty($data['email']) ? strtolower(trim($data['email'])) : 'no-email-' . time() . '-' . ($rowNumber - 1) . '@example.com';
+                $username = !empty($data['email']) ? strtolower(trim(explode('@', $data['email'])[0])) : 'no-username-' . time() . '-' . ($rowNumber - 1);
 
                 // Get employee code - auto generate only if empty
                 $employeeCode = null;
@@ -984,30 +1045,34 @@ class UserController extends Controller
                     // Auto-generate if empty
                     $employeeCode = AppHelper::getEmployeeCode();
                 }
+                if (isset($data['phone_no']) && !empty($data['phone_no'])) {
+                    $mobileNos = explode('/', $data['phone_no']);
+                    $mobileNos = implode(',', $mobileNos);
+                }
 
                 // Create User
                 $user = \App\Models\User::create([
                     'name' => $fullName,
-                    'surname' => trim($data['surname']),
-                    'first_name' => trim($data['first_name']),
+                    'surname' => !empty($data['surname']) ? trim($data['surname']) : '',
+                    'first_name' => !empty($data['first_name']) ? trim($data['first_name']) : '',
                     'middle_name' => !empty($data['middle_name']) ? trim($data['middle_name']) : null,
-                    'email' => $email,
-                    'phone' => trim($data['phone_no']),
-                    'username' => $username,
+                    'email' => $email, // Always provide a value for NOT NULL constraint
+                    'phone' =>$mobileNos ??  'N/A',
+                    'username' => $username, // Always provide a value for NOT NULL constraint
                     'password' => bcrypt('password123'),
                     'employee_code' => $employeeCode, // USE THE VALIDATED/GENERATED CODE
                     'company_id' => $companyId,
-                    'branch_id' => $branch->id,
-                    'department_id' => $department->id,
+                    'branch_id' => $branchId,
+                    'department_id' => $departmentId,
                     'post_id' => $postId,
                     'role_id' => $employeeRole->id,
                     'supervisor_id' => $supervisorId,
                     'designation' => !empty($data['designation']) ? $data['designation'] : null,
-                    'employment_type' => !empty($data['employment_type']) ? ucfirst(strtolower(trim($data['employment_type']))) : 'Permanent',
+                    'employment_type' => !empty($data['employment_type']) ? ucfirst(strtolower(trim($data['employment_type']))) : '',
                     // 'joining_date' => $data['employment_date'],
                     'joining_date' => !empty($data['employment_date']) ? $data['employment_date'] : null,
                     'dob' => !empty($data['date_of_birth']) ? $data['date_of_birth'] : null,
-                    'nin' => $data['nin'] ?? null,
+                    'nin' => !empty($data['nin']) ? $data['nin'] : '',
                     'gender' => 'male',
                     'marital_status' => 'unmarried',
                     'address' => null,
@@ -1036,6 +1101,14 @@ class UserController extends Controller
                 ]);
 
                 $successCount++;
+                $processedCount++;
+
+                // Commit and start new transaction every batch size records
+                if ($processedCount >= $batchSize) {
+                    DB::commit();
+                    DB::beginTransaction();
+                    $processedCount = 0;
+                }
             }
 
             fclose($handle);
@@ -1054,5 +1127,34 @@ class UserController extends Controller
             DB::rollBack();
             return redirect()->back()->with('danger', $exception->getMessage());
         }
+    }
+
+    /**
+     * Process phone numbers from CSV to support multiple numbers
+     * Splits numbers separated by "/" and joins them with ","
+     * Preserves leading zeros and plus signs
+     */
+    private function processPhoneNumbers($phoneString)
+    {
+        if (empty($phoneString)) {
+            return null;
+        }
+
+        // Split by forward slash to handle multiple numbers
+        $phoneNumbers = explode('/', $phoneString);
+
+        // Trim each phone number and remove empty entries
+        $phoneNumbers = array_map('trim', $phoneNumbers);
+        $phoneNumbers = array_filter($phoneNumbers, function($phone) {
+            return !empty($phone);
+        });
+
+        // If no valid phone numbers found, return null
+        if (empty($phoneNumbers)) {
+            return null;
+        }
+
+        // Join with comma for database storage
+        return implode(',', $phoneNumbers);
     }
 }
