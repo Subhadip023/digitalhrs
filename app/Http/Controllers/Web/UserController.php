@@ -1006,26 +1006,23 @@ class UserController extends Controller
                         $openingTime = trim($shiftParts[0]);
                         $closingTime = trim($shiftParts[1]);
 
-                        // Get all office times and manually match
-                        $allOfficeTimes = \App\Models\OfficeTime::where('company_id', $companyId)
-                            ->where('is_active', 1)
-                            ->get();
-
-                        // Find the matching one
-                        foreach ($allOfficeTimes as $ot) {
-                            if ($ot->opening_time === $openingTime && $ot->closing_time === $closingTime) {
-                                $officeTimeId = $ot->id;
-                                break;
-                            }else{
-                                $office = \App\Models\OfficeTime::create([
-                                    'company_id' => $companyId,
-                                    'opening_time' => $openingTime,
-                                    'closing_time' => $closingTime,
-                                    'is_active' => 1,
-                                ]);
-                                $officeTimeId = $office->id;
-                            }
+                       $office = \App\Models\OfficeTime::where([
+                            'company_id' => $companyId,
+                            'opening_time' => $openingTime,
+                            'closing_time' => $closingTime,
+                            'is_active' => 1,
+                        ])->first();
+                        
+                        if (!$office) {
+                            $office = \App\Models\OfficeTime::create([
+                                'company_id' => $companyId,
+                                'opening_time' => $openingTime,
+                                'closing_time' => $closingTime,
+                                'is_active' => 1,
+                            ]);
                         }
+
+                        $officeTimeId=$office->id;
                     }
                 }
 
