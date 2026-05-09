@@ -1013,11 +1013,14 @@ class UserController extends Controller
                             'is_active' => 1,
                         ])->first();
                         
-                        if (!$office) {
+                         if (!$office) {
                             $office = \App\Models\OfficeTime::create([
                                 'company_id' => $companyId,
                                 'opening_time' => $openingTime,
                                 'closing_time' => $closingTime,
+                                'shift' => $openingTime . ' - ' . $closingTime,
+                                'category' => "Full Timer",
+                                'branch_id' => $branchId,
                                 'is_active' => 1,
                             ]);
                         }
